@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from typing import Dict, List, Optional
 
 import google.generativeai as genai
@@ -14,8 +15,8 @@ if not _API_KEY:
 
 genai.configure(api_key=_API_KEY)
 
-# Use the stable flash model (widely available)
-_MODEL_NAME = "gemini-2.0-flash"
+# gemini-1.5-flash has a more generous free tier than gemini-2.0-flash
+_MODEL_NAME = "gemini-1.5-flash"
 model = genai.GenerativeModel(_MODEL_NAME)
 
 
@@ -38,10 +39,22 @@ def _safe_json(text: str) -> Optional[dict]:
     return None
 
 
-def _call_model(prompt: str) -> str:
-    """Thin wrapper around model.generate_content with basic error propagation."""
-    response = model.generate_content(prompt)
-    return response.text.strip()
+def _call_model(prompt: str, retries: int = 3) -> str:
+    """Calls the model with automatic retry on rate-limit (429) errors."""
+    delay = 15
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as exc:
+            err = str(exc)
+            is_rate_limit = "429" in err or "quota" in err.lower() or "rate" in err.lower()
+            if is_rate_limit and attempt < retries - 1:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
+    raise RuntimeError("فشلت جميع محاولات الاتصال بالنموذج.")
 
 
 # ── Video Analysis ─────────────────────────────────────────────────────────────
