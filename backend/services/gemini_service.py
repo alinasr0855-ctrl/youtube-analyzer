@@ -5,19 +5,23 @@ import time
 from typing import Dict, List, Optional
 
 import google.generativeai as genai
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-if not _API_KEY:
-    raise EnvironmentError("GEMINI_API_KEY is not set. Add it to your .env file.")
+_GEMINI_KEY: str = os.getenv("GEMINI_API_KEY", "")
+if not _GEMINI_KEY:
+    raise EnvironmentError("GEMINI_API_KEY is not set.")
 
-genai.configure(api_key=_API_KEY)
+_OPENROUTER_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
-# All free-tier compatible Gemini models in priority order.
-# The system tries each one; if quota is exceeded it falls through to the next.
-_FREE_MODELS = [
+genai.configure(api_key=_GEMINI_KEY)
+
+# ── Model Registry ─────────────────────────────────────────────────────────────
+# Each entry: ("provider", "model_id")
+# Gemini models tried first; DeepSeek via OpenRouter used as fallback.
+_GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
@@ -25,19 +29,33 @@ _FREE_MODELS = [
     "gemini-1.5-pro",
 ]
 
-# Cache model instances to avoid repeated construction
-_model_cache: Dict[str, genai.GenerativeModel] = {}
+# Free DeepSeek models on OpenRouter (append :free suffix for zero-cost tier)
+_OPENROUTER_MODELS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-r1-distill-llama-70b:free",
+]
 
-def _get_model(name: str) -> genai.GenerativeModel:
-    if name not in _model_cache:
-        _model_cache[name] = genai.GenerativeModel(name)
-    return _model_cache[name]
+# Cache Gemini model instances
+_gemini_cache: Dict[str, genai.GenerativeModel] = {}
+
+def _get_gemini(name: str) -> genai.GenerativeModel:
+    if name not in _gemini_cache:
+        _gemini_cache[name] = genai.GenerativeModel(name)
+    return _gemini_cache[name]
+
+def _get_openrouter_client() -> Optional[OpenAI]:
+    if not _OPENROUTER_KEY:
+        return None
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=_OPENROUTER_KEY,
+    )
 
 
 # ── JSON Parsing Helper ────────────────────────────────────────────────────────
 
 def _safe_json(text: str) -> Optional[dict]:
-    """Attempts to parse *text* as JSON; also handles markdown code fences."""
     text = text.strip()
     try:
         return json.loads(text)
@@ -59,14 +77,16 @@ def _is_quota_error(exc: Exception) -> bool:
 
 def _call_model(prompt: str) -> str:
     """
-    Tries all free-tier Gemini models in order.
-    If a model hits its quota limit (429), the next model is tried automatically.
-    Each model also gets one retry with a short delay before moving on.
+    Tries all providers in order:
+      1. Gemini free-tier models (gemini-2.0-flash-lite → gemini-1.5-pro)
+      2. DeepSeek models via OpenRouter (if OPENROUTER_API_KEY is set)
+    On quota/rate errors the next model is tried automatically.
     """
     last_exc: Optional[Exception] = None
 
-    for model_name in _FREE_MODELS:
-        model = _get_model(model_name)
+    # ── 1. Try Gemini models ──────────────────────────────────────────────────
+    for model_name in _GEMINI_MODELS:
+        model = _get_gemini(model_name)
         for attempt in range(2):
             try:
                 response = model.generate_content(prompt)
@@ -77,12 +97,32 @@ def _call_model(prompt: str) -> str:
                     if attempt == 0:
                         time.sleep(10)
                         continue
-                    # Quota exhausted for this model → try next
-                    break
+                    break  # move to next Gemini model
                 else:
                     raise
 
-    raise RuntimeError(f"تجاوزت جميع النماذج المجانية حد الاستخدام. آخر خطأ: {last_exc}")
+    # ── 2. Try DeepSeek via OpenRouter ───────────────────────────────────────
+    client = _get_openrouter_client()
+    if client:
+        for model_name in _OPENROUTER_MODELS:
+            for attempt in range(2):
+                try:
+                    completion = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    return completion.choices[0].message.content.strip()
+                except Exception as exc:
+                    last_exc = exc
+                    if _is_quota_error(exc):
+                        if attempt == 0:
+                            time.sleep(10)
+                            continue
+                        break  # move to next OpenRouter model
+                    else:
+                        raise
+
+    raise RuntimeError(f"تجاوزت جميع النماذج المتاحة حد الاستخدام. آخر خطأ: {last_exc}")
 
 
 # ── Video Analysis ─────────────────────────────────────────────────────────────
