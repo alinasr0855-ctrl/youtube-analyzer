@@ -15,9 +15,23 @@ if not _API_KEY:
 
 genai.configure(api_key=_API_KEY)
 
-# gemini-1.5-flash has a more generous free tier than gemini-2.0-flash
-_MODEL_NAME = "gemini-1.5-flash"
-model = genai.GenerativeModel(_MODEL_NAME)
+# All free-tier compatible Gemini models in priority order.
+# The system tries each one; if quota is exceeded it falls through to the next.
+_FREE_MODELS = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro",
+]
+
+# Cache model instances to avoid repeated construction
+_model_cache: Dict[str, genai.GenerativeModel] = {}
+
+def _get_model(name: str) -> genai.GenerativeModel:
+    if name not in _model_cache:
+        _model_cache[name] = genai.GenerativeModel(name)
+    return _model_cache[name]
 
 
 # ── JSON Parsing Helper ────────────────────────────────────────────────────────
@@ -29,7 +43,6 @@ def _safe_json(text: str) -> Optional[dict]:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Strip ``` fences if present
     match = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
     if match:
         try:
@@ -39,22 +52,37 @@ def _safe_json(text: str) -> Optional[dict]:
     return None
 
 
-def _call_model(prompt: str, retries: int = 3) -> str:
-    """Calls the model with automatic retry on rate-limit (429) errors."""
-    delay = 15
-    for attempt in range(retries):
-        try:
-            response = model.generate_content(prompt)
-            return response.text.strip()
-        except Exception as exc:
-            err = str(exc)
-            is_rate_limit = "429" in err or "quota" in err.lower() or "rate" in err.lower()
-            if is_rate_limit and attempt < retries - 1:
-                time.sleep(delay)
-                delay *= 2
-                continue
-            raise
-    raise RuntimeError("فشلت جميع محاولات الاتصال بالنموذج.")
+def _is_quota_error(exc: Exception) -> bool:
+    err = str(exc)
+    return "429" in err or "quota" in err.lower() or "rate" in err.lower() or "exceeded" in err.lower()
+
+
+def _call_model(prompt: str) -> str:
+    """
+    Tries all free-tier Gemini models in order.
+    If a model hits its quota limit (429), the next model is tried automatically.
+    Each model also gets one retry with a short delay before moving on.
+    """
+    last_exc: Optional[Exception] = None
+
+    for model_name in _FREE_MODELS:
+        model = _get_model(model_name)
+        for attempt in range(2):
+            try:
+                response = model.generate_content(prompt)
+                return response.text.strip()
+            except Exception as exc:
+                last_exc = exc
+                if _is_quota_error(exc):
+                    if attempt == 0:
+                        time.sleep(10)
+                        continue
+                    # Quota exhausted for this model → try next
+                    break
+                else:
+                    raise
+
+    raise RuntimeError(f"تجاوزت جميع النماذج المجانية حد الاستخدام. آخر خطأ: {last_exc}")
 
 
 # ── Video Analysis ─────────────────────────────────────────────────────────────
