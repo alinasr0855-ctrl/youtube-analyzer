@@ -207,11 +207,15 @@ def compare(req: CompareRequest):
     sa = memory_service.get_session(req.session_id_a)
     sb = memory_service.get_session(req.session_id_b)
     if not sa:
-        raise HTTPException(404, f"Session A not found")
+        raise HTTPException(404, "Session A not found")
     if not sb:
-        raise HTTPException(404, f"Session B not found")
+        raise HTTPException(404, "Session B not found")
+    videos_a = [v for v in cache_service.load_results(req.session_id_a) if v.get("analyzed")]
+    videos_b = [v for v in cache_service.load_results(req.session_id_b) if v.get("analyzed")]
+    if not videos_a:
+        raise HTTPException(400, "Playlist A has no analyzed videos yet. Please run the analysis first.")
+    if not videos_b:
+        raise HTTPException(400, "Playlist B has no analyzed videos yet. Please run the analysis first.")
     return gemini_service.compare_playlists(
-        {"name": sa.get("playlist_name", "A"),
-         "videos": cache_service.load_results(req.session_id_a)},
-        {"name": sb.get("playlist_name", "B"),
-         "videos": cache_service.load_results(req.session_id_b)})
+        {"name": sa.get("playlist_name", "A"), "videos": videos_a},
+        {"name": sb.get("playlist_name", "B"), "videos": videos_b})
