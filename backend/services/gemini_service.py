@@ -29,10 +29,11 @@ _GEMINI_MODELS = [
     "gemini-1.5-pro",
 ]
 
-# Free DeepSeek models on OpenRouter (append :free suffix for zero-cost tier)
+# Free DeepSeek models on OpenRouter
 _OPENROUTER_MODELS = [
-    "deepseek/deepseek-chat-v3-0324:free",
+    "deepseek/deepseek-chat:free",
     "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-r1-distill-qwen-32b:free",
     "deepseek/deepseek-r1-distill-llama-70b:free",
 ]
 
