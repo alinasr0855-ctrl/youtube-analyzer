@@ -29,15 +29,14 @@ _GEMINI_MODELS = [
 ]
 
 # ── OpenRouter Free Models ─────────────────────────────────────────────────────
-# Fallback hardcoded list (used if live fetch fails)
+# Primary model tried first before the dynamic list
+_OPENROUTER_PRIMARY = "meta-llama/llama-3.2-3b-instruct:free"
+
+# Fallback hardcoded list (used if live fetch fails or returns empty)
 _OPENROUTER_FALLBACK = [
-    "deepseek/deepseek-r1:free",
-    "deepseek/deepseek-r1-distill-llama-70b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen3-8b:free",
+    "mistralai/mistral-small-2603",
+    "deepseek/deepseek-chat",
+    "google/gemma-3-4b-it:free",
 ]
 
 _openrouter_models_cache: Optional[List[str]] = None
@@ -152,10 +151,18 @@ def _call_model(prompt: str) -> str:
                 else:
                     raise
 
-    # ── 2. Try free models via OpenRouter (fetched live) ─────────────────────
+    # ── 2. Try free models via OpenRouter ────────────────────────────────────
+    # Order: primary model first, then live-fetched list, then fallback
     client = _get_openrouter_client()
     if client:
-        for model_name in _fetch_free_openrouter_models():
+        dynamic = _fetch_free_openrouter_models()
+        seen = set()
+        ordered = []
+        for m in [_OPENROUTER_PRIMARY] + dynamic + _OPENROUTER_FALLBACK:
+            if m not in seen:
+                seen.add(m)
+                ordered.append(m)
+        for model_name in ordered:
             for attempt in range(2):
                 try:
                     completion = client.chat.completions.create(
