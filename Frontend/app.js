@@ -89,7 +89,7 @@ async function doSearch() {
     if (data.type === 'playlist') {
       renderSinglePlaylist(data.playlist);
     } else {
-      renderMixedResults(data.channels || [], data.playlists || []);
+      renderMixedResults(data.channels || [], data.playlists || [], data.videos || []);
     }
   } catch (e) {
     results.innerHTML = `<div class="empty-state"><div class="es-icon">⚠️</div><h3>خطأ في البحث</h3><p>${e.message}</p></div>`;
@@ -108,21 +108,39 @@ function renderSinglePlaylist(pl) {
     </div>`;
 }
 
-function renderMixedResults(channels, playlists) {
+function renderMixedResults(channels, playlists, videos) {
   const results = $('#search-results');
   let html = '';
 
-  if (playlists.length) {
+  if (videos && videos.length) {
     html += `
-      <div class="section-title">🎬 قوائم التشغيل المطابقة (${playlists.length})</div>
+      <div class="section-title">🎬 فيديوهات (${videos.length})</div>
+      <div class="videos-search-grid">
+        ${videos.map(v => `
+          <div class="video-search-card" onclick="loadPlaylists('${v.channel_id}', '${escHtml(v.channel_name)}')">
+            <div class="vsc-thumb-wrap">
+              ${v.thumbnail ? `<img src="${v.thumbnail}" alt="">` : `<div class="vsc-thumb-placeholder">🎬</div>`}
+            </div>
+            <div class="vsc-info">
+              <div class="vsc-title">${v.title}</div>
+              <div class="vsc-channel">📺 ${v.channel_name}</div>
+              <div class="vsc-hint">انقر لعرض قوائم تشغيل القناة</div>
+            </div>
+          </div>`).join('')}
+      </div>`;
+  }
+
+  if (playlists && playlists.length) {
+    html += `
+      <div class="section-title" style="margin-top:20px">📋 قوائم التشغيل (${playlists.length})</div>
       <div class="playlist-grid">
         ${playlists.map(pl => playlistCardHTML(pl, pl.channel_id, pl.channel_name)).join('')}
       </div>`;
   }
 
-  if (channels.length) {
+  if (channels && channels.length) {
     html += `
-      <div class="section-title" style="margin-top:20px">📺 القنوات المطابقة (${channels.length})</div>
+      <div class="section-title" style="margin-top:20px">📺 القنوات (${channels.length})</div>
       <div class="results-grid">
         ${channels.map(ch => `
           <div class="channel-card" onclick="loadPlaylists('${ch.channel_id}', '${escHtml(ch.title)}')">

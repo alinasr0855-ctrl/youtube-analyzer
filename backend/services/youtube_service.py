@@ -54,34 +54,81 @@ def get_channel_uploads_playlist_id(channel_id: str) -> Optional[str]:
         return None
 
 
-def search_playlists(query: str) -> List[Dict]:
-    """Searches YouTube for playlists matching *query*."""
-    try:
-        response = youtube.search().list(
-            part="snippet",
-            q=query,
-            type="playlist",
-            maxResults=12,
-        ).execute()
-    except HttpError as exc:
-        raise RuntimeError(f"YouTube API error while searching playlists: {exc}") from exc
+def search_all(query: str) -> Dict:
+    """
+    Searches YouTube for videos, playlists, and channels matching *query*.
+    Returns a dict with keys: videos, playlists, channels.
+    Uses a single search() call per type to stay within quota.
+    """
+    videos: List[Dict] = []
+    playlists: List[Dict] = []
+    channels: List[Dict] = []
 
-    results = []
-    for item in response.get("items", []):
-        snippet = item["snippet"]
-        pid = item["id"].get("playlistId", "")
-        if not pid:
-            continue
-        results.append({
-            "playlist_id": pid,
-            "title": snippet["title"],
-            "description": snippet.get("description", ""),
-            "thumbnail": snippet["thumbnails"].get("medium", {}).get("url", ""),
-            "channel_id": snippet.get("channelId", ""),
-            "channel_name": snippet.get("channelTitle", ""),
-            "video_count": "—",
-        })
-    return results
+    # Search videos
+    try:
+        resp = youtube.search().list(
+            part="snippet", q=query, type="video", maxResults=12,
+        ).execute()
+        for item in resp.get("items", []):
+            s = item["snippet"]
+            vid = item["id"].get("videoId", "")
+            if not vid:
+                continue
+            videos.append({
+                "video_id": vid,
+                "title": s["title"],
+                "description": s.get("description", ""),
+                "thumbnail": s["thumbnails"].get("medium", {}).get("url", ""),
+                "channel_id": s.get("channelId", ""),
+                "channel_name": s.get("channelTitle", ""),
+                "published_at": s.get("publishedAt", ""),
+            })
+    except HttpError:
+        pass
+
+    # Search playlists
+    try:
+        resp = youtube.search().list(
+            part="snippet", q=query, type="playlist", maxResults=8,
+        ).execute()
+        for item in resp.get("items", []):
+            s = item["snippet"]
+            pid = item["id"].get("playlistId", "")
+            if not pid:
+                continue
+            playlists.append({
+                "playlist_id": pid,
+                "title": s["title"],
+                "description": s.get("description", ""),
+                "thumbnail": s["thumbnails"].get("medium", {}).get("url", ""),
+                "channel_id": s.get("channelId", ""),
+                "channel_name": s.get("channelTitle", ""),
+                "video_count": "—",
+            })
+    except HttpError:
+        pass
+
+    # Search channels
+    try:
+        resp = youtube.search().list(
+            part="snippet", q=query, type="channel", maxResults=6,
+        ).execute()
+        for item in resp.get("items", []):
+            s = item["snippet"]
+            channels.append({
+                "channel_id": s["channelId"],
+                "title": s["title"],
+                "description": s.get("description", ""),
+                "thumbnail": s["thumbnails"].get("default", {}).get("url", ""),
+            })
+    except HttpError:
+        pass
+
+    return {"videos": videos, "playlists": playlists, "channels": channels}
+
+
+def search_playlists(query: str) -> List[Dict]:
+    return search_all(query).get("playlists", [])
 
 
 def search_channels(query: str) -> List[Dict]:

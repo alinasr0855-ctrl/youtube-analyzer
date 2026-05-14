@@ -13,7 +13,7 @@ from backend.models.schemas import (
     CompareRequest, StartSessionRequest,
 )
 from backend.services import cache_service, gemini_service, memory_service, youtube_service
-from backend.services.youtube_service import search_playlists, get_channel_uploads_playlist_id
+from backend.services.youtube_service import search_all, get_channel_uploads_playlist_id
 
 app = FastAPI(title="PlaylistAI", version="3.0.0")
 
@@ -67,18 +67,17 @@ def search(req: ChannelSearchRequest):
         if not info:
             raise HTTPException(404, "Playlist not found")
         return {"type": "playlist", "playlist": info, "channels": [], "playlists": []}
-    # Keyword search: return both channels and playlists
-    try:
-        channels = youtube_service.search_channels(q)
-    except RuntimeError as e:
-        channels = []
-    try:
-        playlists = search_playlists(q)
-    except RuntimeError:
-        playlists = []
-    if not channels and not playlists:
+    # Keyword search: videos + playlists + channels
+    results = search_all(q)
+    if not results["videos"] and not results["playlists"] and not results["channels"]:
         raise HTTPException(404, "لم يتم العثور على نتائج")
-    return {"type": "mixed", "channels": channels, "playlists": playlists, "playlist": None}
+    return {
+        "type": "mixed",
+        "videos": results["videos"],
+        "playlists": results["playlists"],
+        "channels": results["channels"],
+        "playlist": None,
+    }
 
 @app.get("/api/channels/{channel_id}/playlists")
 def get_playlists(channel_id: str):
