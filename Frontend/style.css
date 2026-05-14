@@ -369,13 +369,18 @@ main {
   aspect-ratio: 16/9;
   overflow: hidden;
   background: var(--bg-3);
+  display: block;
+  position: relative;
+  text-decoration: none;
 }
 .vsc-thumb-wrap img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.2s;
 }
+.vsc-thumb-wrap:hover img { transform: scale(1.04); }
 .vsc-thumb-placeholder {
   width: 100%;
   height: 100%;
@@ -383,11 +388,24 @@ main {
   place-items: center;
   font-size: 32px;
 }
+.vsc-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  color: #fff;
+  background: rgba(0,0,0,0.35);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.vsc-thumb-wrap:hover .vsc-play-overlay { opacity: 1; }
 .vsc-info {
   padding: 10px 12px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 .vsc-title {
   font-size: 13px;
@@ -399,16 +417,32 @@ main {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  text-decoration: none;
 }
+.vsc-title:hover { color: var(--red); text-decoration: underline; }
 .vsc-channel {
   font-size: 11px;
   color: var(--teal);
   font-family: var(--font-ar);
 }
-.vsc-hint {
-  font-size: 10px;
-  color: var(--text-3);
+.vsc-channel-btn {
+  margin-top: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-s);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 11px;
   font-family: var(--font-ar);
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: right;
+  transition: all 0.18s;
+  width: 100%;
+}
+.vsc-channel-btn:hover {
+  border-color: var(--red);
+  color: var(--text);
+  background: var(--red-dim);
 }
 
 /* ── Playlist Grid ──────────────────────────────────────────────────────────── */

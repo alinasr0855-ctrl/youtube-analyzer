@@ -54,27 +54,19 @@ def get_channel_uploads_playlist_id(channel_id: str) -> Optional[str]:
         return None
 
 
-def search_all(query: str) -> Dict:
-    """
-    Searches YouTube for videos, playlists, and channels matching *query*.
-    Returns a dict with keys: videos, playlists, channels.
-    Uses a single search() call per type to stay within quota.
-    """
-    videos: List[Dict] = []
-    playlists: List[Dict] = []
-    channels: List[Dict] = []
-
-    # Search videos
+def _search_videos(query: str) -> List[Dict]:
     try:
         resp = youtube.search().list(
-            part="snippet", q=query, type="video", maxResults=12,
+            part="snippet", q=query, type="video", maxResults=15,
+            relevanceLanguage="ar",
         ).execute()
+        results = []
         for item in resp.get("items", []):
             s = item["snippet"]
             vid = item["id"].get("videoId", "")
             if not vid:
                 continue
-            videos.append({
+            results.append({
                 "video_id": vid,
                 "title": s["title"],
                 "description": s.get("description", ""),
@@ -83,20 +75,23 @@ def search_all(query: str) -> Dict:
                 "channel_name": s.get("channelTitle", ""),
                 "published_at": s.get("publishedAt", ""),
             })
+        return results
     except HttpError:
-        pass
+        return []
 
-    # Search playlists
+
+def _search_playlists(query: str) -> List[Dict]:
     try:
         resp = youtube.search().list(
             part="snippet", q=query, type="playlist", maxResults=8,
         ).execute()
+        results = []
         for item in resp.get("items", []):
             s = item["snippet"]
             pid = item["id"].get("playlistId", "")
             if not pid:
                 continue
-            playlists.append({
+            results.append({
                 "playlist_id": pid,
                 "title": s["title"],
                 "description": s.get("description", ""),
@@ -105,24 +100,45 @@ def search_all(query: str) -> Dict:
                 "channel_name": s.get("channelTitle", ""),
                 "video_count": "—",
             })
+        return results
     except HttpError:
-        pass
+        return []
 
-    # Search channels
+
+def _search_channels(query: str) -> List[Dict]:
     try:
         resp = youtube.search().list(
-            part="snippet", q=query, type="channel", maxResults=6,
+            part="snippet", q=query, type="channel", maxResults=5,
         ).execute()
+        results = []
         for item in resp.get("items", []):
             s = item["snippet"]
-            channels.append({
+            results.append({
                 "channel_id": s["channelId"],
                 "title": s["title"],
                 "description": s.get("description", ""),
                 "thumbnail": s["thumbnails"].get("default", {}).get("url", ""),
             })
+        return results
     except HttpError:
-        pass
+        return []
+
+
+def search_all(query: str) -> Dict:
+    """
+    Searches YouTube for videos, playlists, and channels in parallel.
+    Returns a dict with keys: videos, playlists, channels.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        fut_videos   = executor.submit(_search_videos,   query)
+        fut_playlists = executor.submit(_search_playlists, query)
+        fut_channels  = executor.submit(_search_channels,  query)
+
+        videos   = fut_videos.result()
+        playlists = fut_playlists.result()
+        channels  = fut_channels.result()
 
     return {"videos": videos, "playlists": playlists, "channels": channels}
 

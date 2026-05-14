@@ -117,14 +117,15 @@ function renderMixedResults(channels, playlists, videos) {
       <div class="section-title">🎬 فيديوهات (${videos.length})</div>
       <div class="videos-search-grid">
         ${videos.map(v => `
-          <div class="video-search-card" onclick="loadPlaylists('${v.channel_id}', '${escHtml(v.channel_name)}')">
-            <div class="vsc-thumb-wrap">
+          <div class="video-search-card">
+            <a class="vsc-thumb-wrap" href="https://www.youtube.com/watch?v=${v.video_id}" target="_blank" rel="noopener" title="شاهد على يوتيوب">
               ${v.thumbnail ? `<img src="${v.thumbnail}" alt="">` : `<div class="vsc-thumb-placeholder">🎬</div>`}
-            </div>
+              <div class="vsc-play-overlay">▶</div>
+            </a>
             <div class="vsc-info">
-              <div class="vsc-title">${v.title}</div>
+              <a class="vsc-title" href="https://www.youtube.com/watch?v=${v.video_id}" target="_blank" rel="noopener">${v.title}</a>
               <div class="vsc-channel">📺 ${v.channel_name}</div>
-              <div class="vsc-hint">انقر لعرض قوائم تشغيل القناة</div>
+              <button class="vsc-channel-btn" onclick="loadPlaylists('${v.channel_id}', '${escHtml(v.channel_name)}')">📋 تحليل قناة هذا الفيديو</button>
             </div>
           </div>`).join('')}
       </div>`;
