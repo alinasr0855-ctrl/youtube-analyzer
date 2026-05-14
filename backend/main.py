@@ -13,6 +13,7 @@ from backend.models.schemas import (
     CompareRequest, StartSessionRequest,
 )
 from backend.services import cache_service, gemini_service, memory_service, youtube_service
+from backend.services.youtube_service import search_playlists, get_channel_uploads_playlist_id
 
 app = FastAPI(title="PlaylistAI", version="3.0.0")
 
@@ -65,14 +66,19 @@ def search(req: ChannelSearchRequest):
             raise HTTPException(502, str(e))
         if not info:
             raise HTTPException(404, "Playlist not found")
-        return {"type": "playlist", "playlist": info, "channels": []}
+        return {"type": "playlist", "playlist": info, "channels": [], "playlists": []}
+    # Keyword search: return both channels and playlists
     try:
         channels = youtube_service.search_channels(q)
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
-    if not channels:
-        raise HTTPException(404, "No channels found")
-    return {"type": "channels", "channels": channels, "playlist": None}
+        channels = []
+    try:
+        playlists = search_playlists(q)
+    except RuntimeError:
+        playlists = []
+    if not channels and not playlists:
+        raise HTTPException(404, "لم يتم العثور على نتائج")
+    return {"type": "mixed", "channels": channels, "playlists": playlists, "playlist": None}
 
 @app.get("/api/channels/{channel_id}/playlists")
 def get_playlists(channel_id: str):
@@ -80,6 +86,18 @@ def get_playlists(channel_id: str):
         return {"playlists": youtube_service.get_channel_playlists(channel_id)}
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+
+@app.get("/api/channels/{channel_id}/uploads")
+def get_channel_uploads(channel_id: str):
+    """Returns the uploads playlist ID for a channel (all its videos)."""
+    uploads_id = get_channel_uploads_playlist_id(channel_id)
+    if not uploads_id:
+        raise HTTPException(404, "تعذر الحصول على قائمة فيديوهات القناة")
+    try:
+        info = youtube_service.get_playlist_info(uploads_id)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    return {"playlist_id": uploads_id, "info": info}
 
 # ── Start Session ─────────────────────────────────────────────────────────────
 @app.post("/api/sessions/start")

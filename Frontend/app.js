@@ -89,7 +89,7 @@ async function doSearch() {
     if (data.type === 'playlist') {
       renderSinglePlaylist(data.playlist);
     } else {
-      renderChannels(data.channels);
+      renderMixedResults(data.channels || [], data.playlists || []);
     }
   } catch (e) {
     results.innerHTML = `<div class="empty-state"><div class="es-icon">⚠️</div><h3>خطأ في البحث</h3><p>${e.message}</p></div>`;
@@ -108,39 +108,80 @@ function renderSinglePlaylist(pl) {
     </div>`;
 }
 
-function renderChannels(channels) {
+function renderMixedResults(channels, playlists) {
   const results = $('#search-results');
-  results.innerHTML = `
-    <div class="section-title">📺 القنوات المطابقة (${channels.length})</div>
-    <div class="results-grid">
-      ${channels.map(ch => `
-        <div class="channel-card" onclick="loadPlaylists('${ch.channel_id}', '${escHtml(ch.title)}')">
-          ${ch.thumbnail
-            ? `<img src="${ch.thumbnail}" alt="">`
-            : `<div class="fallback-avatar">📺</div>`}
-          <div class="channel-info">
-            <div class="name">${ch.title}</div>
-            <div class="desc">${ch.description || 'لا يوجد وصف'}</div>
-          </div>
-        </div>`).join('')}
-    </div>`;
+  let html = '';
+
+  if (playlists.length) {
+    html += `
+      <div class="section-title">🎬 قوائم التشغيل المطابقة (${playlists.length})</div>
+      <div class="playlist-grid">
+        ${playlists.map(pl => playlistCardHTML(pl, pl.channel_id, pl.channel_name)).join('')}
+      </div>`;
+  }
+
+  if (channels.length) {
+    html += `
+      <div class="section-title" style="margin-top:20px">📺 القنوات المطابقة (${channels.length})</div>
+      <div class="results-grid">
+        ${channels.map(ch => `
+          <div class="channel-card" onclick="loadPlaylists('${ch.channel_id}', '${escHtml(ch.title)}')">
+            ${ch.thumbnail
+              ? `<img src="${ch.thumbnail}" alt="">`
+              : `<div class="fallback-avatar">📺</div>`}
+            <div class="channel-info">
+              <div class="name">${ch.title}</div>
+              <div class="desc">${ch.description || 'لا يوجد وصف'}</div>
+            </div>
+          </div>`).join('')}
+      </div>`;
+  }
+
+  results.innerHTML = html || '<div class="empty-state"><h3>لا توجد نتائج</h3></div>';
 }
 
 async function loadPlaylists(channelId, channelName) {
   const results = $('#search-results');
-  results.innerHTML = loader('جارٍ تحميل قوائم التشغيل...');
+  results.innerHTML = loader('جارٍ تحميل محتوى القناة...');
   try {
-    const { playlists } = await api(`/channels/${channelId}/playlists`);
-    if (!playlists.length) {
-      results.innerHTML = '<div class="empty-state"><div class="es-icon">📭</div><h3>لا توجد قوائم تشغيل</h3></div>';
-      return;
+    const [playlistsData, uploadsData] = await Promise.allSettled([
+      api(`/channels/${channelId}/playlists`),
+      api(`/channels/${channelId}/uploads`),
+    ]);
+
+    const playlists = playlistsData.status === 'fulfilled' ? playlistsData.value.playlists : [];
+    const uploads = uploadsData.status === 'fulfilled' ? uploadsData.value : null;
+
+    let html = `
+      <button class="back-btn" onclick="doSearch()">← رجوع للنتائج</button>
+      <div class="section-title">📺 ${channelName}</div>`;
+
+    if (uploads) {
+      const uploadsCard = {
+        playlist_id: uploads.playlist_id,
+        title: `📹 كل فيديوهات القناة`,
+        description: 'جميع فيديوهات القناة مجمعة في قائمة واحدة',
+        thumbnail: uploads.info?.thumbnail || '',
+        video_count: uploads.info?.video_count || '—',
+      };
+      html += `
+        <div class="section-title" style="margin-top:12px;color:var(--accent-teal)">🎬 الفيديوهات</div>
+        <div class="playlist-grid">
+          ${playlistCardHTML(uploadsCard, channelId, channelName)}
+        </div>`;
     }
-    results.innerHTML = `
-      <button class="back-btn" onclick="$('#search-results').innerHTML=''">← رجوع</button>
-      <div class="section-title">📋 قوائم تشغيل: ${channelName}</div>
-      <div class="playlist-grid">
-        ${playlists.map(pl => playlistCardHTML(pl, channelId, channelName)).join('')}
-      </div>`;
+
+    if (playlists.length) {
+      html += `
+        <div class="section-title" style="margin-top:16px">📋 قوائم التشغيل (${playlists.length})</div>
+        <div class="playlist-grid">
+          ${playlists.map(pl => playlistCardHTML(pl, channelId, channelName)).join('')}
+        </div>`;
+    } else if (!uploads) {
+      html += '<div class="empty-state"><div class="es-icon">📭</div><h3>لا يوجد محتوى متاح</h3></div>';
+    }
+
+    results.innerHTML = html;
   } catch (e) {
     results.innerHTML = `<div class="empty-state"><div class="es-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }

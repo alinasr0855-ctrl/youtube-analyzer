@@ -39,6 +39,51 @@ def extract_channel_handle(url: str) -> Optional[str]:
 
 # ── Channels ───────────────────────────────────────────────────────────────────
 
+def get_channel_uploads_playlist_id(channel_id: str) -> Optional[str]:
+    """Returns the uploads playlist ID for a channel (contains all its videos)."""
+    try:
+        response = youtube.channels().list(
+            part="contentDetails",
+            id=channel_id,
+        ).execute()
+        items = response.get("items", [])
+        if not items:
+            return None
+        return items[0]["contentDetails"]["relatedPlaylists"].get("uploads")
+    except HttpError:
+        return None
+
+
+def search_playlists(query: str) -> List[Dict]:
+    """Searches YouTube for playlists matching *query*."""
+    try:
+        response = youtube.search().list(
+            part="snippet",
+            q=query,
+            type="playlist",
+            maxResults=12,
+        ).execute()
+    except HttpError as exc:
+        raise RuntimeError(f"YouTube API error while searching playlists: {exc}") from exc
+
+    results = []
+    for item in response.get("items", []):
+        snippet = item["snippet"]
+        pid = item["id"].get("playlistId", "")
+        if not pid:
+            continue
+        results.append({
+            "playlist_id": pid,
+            "title": snippet["title"],
+            "description": snippet.get("description", ""),
+            "thumbnail": snippet["thumbnails"].get("medium", {}).get("url", ""),
+            "channel_id": snippet.get("channelId", ""),
+            "channel_name": snippet.get("channelTitle", ""),
+            "video_count": "—",
+        })
+    return results
+
+
 def search_channels(query: str) -> List[Dict]:
     """
     Searches YouTube for channels matching *query*.
