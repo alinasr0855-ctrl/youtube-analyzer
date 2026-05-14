@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import httpx
 from typing import Dict, List, Optional
 
 import google.generativeai as genai
@@ -18,9 +19,7 @@ _OPENROUTER_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
 genai.configure(api_key=_GEMINI_KEY)
 
-# ── Model Registry ─────────────────────────────────────────────────────────────
-# Each entry: ("provider", "model_id")
-# Gemini models tried first; DeepSeek via OpenRouter used as fallback.
+# ── Gemini Models ──────────────────────────────────────────────────────────────
 _GEMINI_MODELS = [
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
@@ -29,13 +28,64 @@ _GEMINI_MODELS = [
     "gemini-1.5-pro",
 ]
 
-# Free DeepSeek models on OpenRouter
-_OPENROUTER_MODELS = [
-    "deepseek/deepseek-chat:free",
+# ── OpenRouter Free Models ─────────────────────────────────────────────────────
+# Fallback hardcoded list (used if live fetch fails)
+_OPENROUTER_FALLBACK = [
     "deepseek/deepseek-r1:free",
-    "deepseek/deepseek-r1-distill-qwen-32b:free",
     "deepseek/deepseek-r1-distill-llama-70b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen3-8b:free",
 ]
+
+_openrouter_models_cache: Optional[List[str]] = None
+
+
+def _fetch_free_openrouter_models() -> List[str]:
+    """Fetches all currently available :free models from OpenRouter at runtime."""
+    global _openrouter_models_cache
+    if _openrouter_models_cache is not None:
+        return _openrouter_models_cache
+
+    if not _OPENROUTER_KEY:
+        _openrouter_models_cache = []
+        return []
+
+    try:
+        resp = httpx.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {_OPENROUTER_KEY}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+
+        free_models = []
+        deepseek_first = []
+        others = []
+        for m in data:
+            mid = m.get("id", "")
+            # A model is free if its id ends with :free OR both prompt/completion pricing = "0"
+            pricing = m.get("pricing", {})
+            is_free = mid.endswith(":free") or (
+                str(pricing.get("prompt", "1")) == "0"
+                and str(pricing.get("completion", "1")) == "0"
+            )
+            if is_free:
+                if "deepseek" in mid:
+                    deepseek_first.append(mid)
+                else:
+                    others.append(mid)
+
+        free_models = deepseek_first + others
+        _openrouter_models_cache = free_models if free_models else _OPENROUTER_FALLBACK
+    except Exception:
+        _openrouter_models_cache = _OPENROUTER_FALLBACK
+
+    return _openrouter_models_cache
+
 
 # Cache Gemini model instances
 _gemini_cache: Dict[str, genai.GenerativeModel] = {}
@@ -102,10 +152,10 @@ def _call_model(prompt: str) -> str:
                 else:
                     raise
 
-    # ── 2. Try DeepSeek via OpenRouter ───────────────────────────────────────
+    # ── 2. Try free models via OpenRouter (fetched live) ─────────────────────
     client = _get_openrouter_client()
     if client:
-        for model_name in _OPENROUTER_MODELS:
+        for model_name in _fetch_free_openrouter_models():
             for attempt in range(2):
                 try:
                     completion = client.chat.completions.create(
