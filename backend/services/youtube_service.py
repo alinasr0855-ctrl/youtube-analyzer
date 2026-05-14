@@ -54,11 +54,16 @@ def get_channel_uploads_playlist_id(channel_id: str) -> Optional[str]:
         return None
 
 
+def _make_youtube():
+    """Creates a fresh thread-local YouTube API client."""
+    return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+
+
 def _search_videos(query: str) -> List[Dict]:
     try:
-        resp = youtube.search().list(
+        yt = _make_youtube()
+        resp = yt.search().list(
             part="snippet", q=query, type="video", maxResults=15,
-            relevanceLanguage="ar",
         ).execute()
         results = []
         for item in resp.get("items", []):
@@ -76,13 +81,14 @@ def _search_videos(query: str) -> List[Dict]:
                 "published_at": s.get("publishedAt", ""),
             })
         return results
-    except HttpError:
+    except Exception:
         return []
 
 
 def _search_playlists(query: str) -> List[Dict]:
     try:
-        resp = youtube.search().list(
+        yt = _make_youtube()
+        resp = yt.search().list(
             part="snippet", q=query, type="playlist", maxResults=8,
         ).execute()
         results = []
@@ -101,13 +107,14 @@ def _search_playlists(query: str) -> List[Dict]:
                 "video_count": "—",
             })
         return results
-    except HttpError:
+    except Exception:
         return []
 
 
 def _search_channels(query: str) -> List[Dict]:
     try:
-        resp = youtube.search().list(
+        yt = _make_youtube()
+        resp = yt.search().list(
             part="snippet", q=query, type="channel", maxResults=5,
         ).execute()
         results = []
@@ -120,23 +127,23 @@ def _search_channels(query: str) -> List[Dict]:
                 "thumbnail": s["thumbnails"].get("default", {}).get("url", ""),
             })
         return results
-    except HttpError:
+    except Exception:
         return []
 
 
 def search_all(query: str) -> Dict:
     """
     Searches YouTube for videos, playlists, and channels in parallel.
-    Returns a dict with keys: videos, playlists, channels.
+    Each worker creates its own API client to avoid thread-safety issues.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        fut_videos   = executor.submit(_search_videos,   query)
+        fut_videos    = executor.submit(_search_videos,    query)
         fut_playlists = executor.submit(_search_playlists, query)
         fut_channels  = executor.submit(_search_channels,  query)
 
-        videos   = fut_videos.result()
+        videos    = fut_videos.result()
         playlists = fut_playlists.result()
         channels  = fut_channels.result()
 
