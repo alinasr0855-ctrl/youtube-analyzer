@@ -125,60 +125,64 @@ def _is_quota_error(exc: Exception) -> bool:
     return "429" in err or "quota" in err.lower() or "rate" in err.lower() or "exceeded" in err.lower()
 
 
+_GEMINI_CONFIG = {
+    "max_output_tokens": 2048,
+    "temperature": 0.4,
+}
+
 def _call_model(prompt: str) -> str:
     """
-    Tries all providers in order:
-      1. Gemini free-tier models (gemini-2.0-flash-lite → gemini-1.5-pro)
-      2. DeepSeek models via OpenRouter (if OPENROUTER_API_KEY is set)
-    On quota/rate errors the next model is tried automatically.
+    Tries all providers in order with fast fallback:
+      1. Gemini free-tier models (gemini-2.0-flash-lite first — fastest)
+      2. Top OpenRouter free models (limited to 5 to avoid long chains)
+    Quota errors trigger immediate move to next model (2s sleep only).
     """
     last_exc: Optional[Exception] = None
 
     # ── 1. Try Gemini models ──────────────────────────────────────────────────
     for model_name in _GEMINI_MODELS:
         model = _get_gemini(model_name)
-        for attempt in range(2):
-            try:
-                response = model.generate_content(prompt)
-                return response.text.strip()
-            except Exception as exc:
-                last_exc = exc
-                if _is_quota_error(exc):
-                    if attempt == 0:
-                        time.sleep(10)
-                        continue
-                    break  # move to next Gemini model
-                else:
-                    raise
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config=_GEMINI_CONFIG,
+            )
+            return response.text.strip()
+        except Exception as exc:
+            last_exc = exc
+            if _is_quota_error(exc):
+                time.sleep(2)   # short pause then try next model immediately
+                continue
+            else:
+                raise           # non-quota error → surface immediately
 
     # ── 2. Try free models via OpenRouter ────────────────────────────────────
-    # Order: primary model first, then live-fetched list, then fallback
     client = _get_openrouter_client()
     if client:
         dynamic = _fetch_free_openrouter_models()
-        seen = set()
-        ordered = []
+        seen: set = set()
+        ordered: List[str] = []
         for m in [_OPENROUTER_PRIMARY] + dynamic + _OPENROUTER_FALLBACK:
             if m not in seen:
                 seen.add(m)
                 ordered.append(m)
-        for model_name in ordered:
-            for attempt in range(2):
-                try:
-                    completion = client.chat.completions.create(
-                        model=model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    return completion.choices[0].message.content.strip()
-                except Exception as exc:
-                    last_exc = exc
-                    if _is_quota_error(exc):
-                        if attempt == 0:
-                            time.sleep(10)
-                            continue
-                        break  # move to next OpenRouter model
-                    else:
-                        raise
+        # Limit to top 5 to avoid long fallback chains
+        for model_name in ordered[:5]:
+            try:
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=2048,
+                    timeout=30,
+                )
+                return completion.choices[0].message.content.strip()
+            except Exception as exc:
+                last_exc = exc
+                if _is_quota_error(exc):
+                    time.sleep(2)
+                    continue
+                else:
+                    raise
 
     raise RuntimeError(f"تجاوزت جميع النماذج المتاحة حد الاستخدام. آخر خطأ: {last_exc}")
 
