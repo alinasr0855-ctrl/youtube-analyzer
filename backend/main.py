@@ -202,6 +202,43 @@ def learning_path(session_id: str):
     memory_service.save_learning_path(session_id, result)
     return {"learning_path": result, "cached": False}
 
+# ── Start Single-Video Session ────────────────────────────────────────────────
+@app.post("/api/sessions/start-video")
+def start_video_session(data: dict):
+    video_id = data.get("video_id")
+    if not video_id:
+        raise HTTPException(400, "video_id required")
+    title = data.get("title", "Unknown Video")
+    channel_id = data.get("channel_id", "")
+    channel_name = data.get("channel_name", "Unknown Channel")
+    thumbnail = data.get("thumbnail", "")
+    description = data.get("description", "")
+    sid = memory_service.create_session(
+        channel_name=channel_name,
+        channel_id=channel_id,
+        playlist_name=title,
+        playlist_id=f"video:{video_id}",
+        total_videos=1,
+    )
+    cache_service.save_results(sid, [{
+        "video_id": video_id,
+        "title": title,
+        "thumbnail": thumbnail,
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "description": description,
+        "position": 0,
+        "analyzed": False,
+        "explanation": None,
+        "level": None,
+        "type": None,
+        "topics": [],
+        "estimated_minutes": None,
+        "requires_previous": False,
+    }])
+    return {"session_id": sid, "total_videos": 1,
+            "session": memory_service.get_session(sid)}
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 @app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
 def chat(session_id: str, req: ChatRequest):
