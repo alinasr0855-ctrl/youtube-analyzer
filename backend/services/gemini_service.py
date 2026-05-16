@@ -194,10 +194,21 @@ def analyze_batch(videos: List[Dict]) -> List[Dict]:
     Analyzes a list of video dicts (which may include a ``transcript`` key)
     and annotates each with: explanation, level, type, topics,
     estimated_minutes, requires_previous.
+    Uses persistent file cache keyed by video_id to avoid re-analyzing.
     """
+    from backend.services import video_cache
+
     results: List[Dict] = []
 
     for video in videos:
+        video_id: str = video.get("video_id", "")
+
+        # ── Check persistent cache first ──────────────────────────────────
+        cached = video_cache.get(video_id) if video_id else None
+        if cached:
+            results.append({**video, **cached, "analyzed": True})
+            continue
+
         title: str = video.get("title", "")
         description: str = (video.get("description", "") or "")[:1500]
         transcript: str = (video.get("transcript", "") or "")[:5000]
@@ -231,32 +242,30 @@ def analyze_batch(videos: List[Dict]) -> List[Dict]:
             raw = _call_model(prompt)
             parsed = _safe_json(raw)
             if parsed and "explanation" in parsed:
-                results.append(
-                    {
-                        **video,
-                        "explanation": parsed.get("explanation", ""),
-                        "level": parsed.get("level", ""),
-                        "type": parsed.get("type", ""),
-                        "topics": parsed.get("topics", []),
-                        "estimated_minutes": parsed.get("estimated_minutes"),
-                        "requires_previous": parsed.get("requires_previous", False),
-                        "analyzed": True,
-                    }
-                )
+                analysis = {
+                    "explanation": parsed.get("explanation", ""),
+                    "level": parsed.get("level", ""),
+                    "type": parsed.get("type", ""),
+                    "topics": parsed.get("topics", []),
+                    "estimated_minutes": parsed.get("estimated_minutes"),
+                    "requires_previous": parsed.get("requires_previous", False),
+                }
+                if video_id:
+                    video_cache.set(video_id, analysis)
+                results.append({**video, **analysis, "analyzed": True})
             else:
                 # Model returned non-JSON; store raw text as explanation
-                results.append(
-                    {
-                        **video,
-                        "explanation": raw,
-                        "level": "",
-                        "type": "",
-                        "topics": [],
-                        "estimated_minutes": None,
-                        "requires_previous": False,
-                        "analyzed": True,
-                    }
-                )
+                analysis = {
+                    "explanation": raw,
+                    "level": "",
+                    "type": "",
+                    "topics": [],
+                    "estimated_minutes": None,
+                    "requires_previous": False,
+                }
+                if video_id:
+                    video_cache.set(video_id, analysis)
+                results.append({**video, **analysis, "analyzed": True})
         except Exception as exc:
             results.append(
                 {
@@ -378,14 +387,23 @@ def chat_with_playlist(
     """
     analyzed = [v for v in videos if v.get("analyzed")]
 
+    # Detect if user wants a detailed explanation
+    explain_keywords = ["اشرح", "شرح", "وضح", "فسر", "تفصيل", "بالتفصيل",
+                        "كيف يعمل", "ما هو", "ما هي", "explain", "detail"]
+    is_explanation = any(kw in question.lower() for kw in explain_keywords)
+
     video_context = []
     for v in analyzed:
         topics_str = "، ".join(v.get("topics") or []) or "—"
-        snippet = (v.get("explanation") or "")[:300]
+        # Use full explanation for context (not 300 chars)
+        explanation = (v.get("explanation") or "")[:2000]
         video_context.append(
-            f"[فيديو {v.get('position', 0) + 1} | ID:{v['video_id']}] "
-            f"عنوان: {v.get('title', '')} | مستوى: {v.get('level', '—')} | "
-            f"مواضيع: {topics_str} | ملخص: {snippet}"
+            f"[فيديو {v.get('position', 0) + 1} | ID:{v['video_id']}]\n"
+            f"عنوان: {v.get('title', '')}\n"
+            f"مستوى: {v.get('level', '—')} | نوع: {v.get('type', '—')} | "
+            f"مدة: {v.get('estimated_minutes', '—')} دقيقة\n"
+            f"مواضيع: {topics_str}\n"
+            f"تحليل الفيديو:\n{explanation}"
         )
 
     # Keep only the last 6 turns to stay within token limits
@@ -395,8 +413,20 @@ def chat_with_playlist(
         history_lines.append(f"{role}: {msg.get('content', '')}")
     history_str = "\n".join(history_lines)
 
-    prompt = f"""أنت مساعد ذكي متخصص في Playlist YouTube باسم "{playlist_name}".
-لديك المعلومات التالية عن فيديوهات هذه الـ Playlist:
+    if is_explanation:
+        answer_instruction = """إجابة تفصيلية منظمة بالكامل تتضمن:
+- عناوين رئيسية وفرعية واضحة (## و ###)
+- نقاط مرقمة أو نقاط عادية لكل فكرة
+- شرح كل مفهوم مع أمثلة عملية إن أمكن
+- لا تختصر — اشرح كل نقطة بشكل وافٍ
+- استخدم محتوى التحليل الكامل للفيديو"""
+    else:
+        answer_instruction = "إجابة واضحة ومفيدة بالعربية مبنية على محتوى الـ Playlist"
+
+    prompt = f"""أنت مساعد ذكي متخصص في تحليل محتوى الفيديوهات التعليمية على YouTube.
+اسم المحتوى المحلَّل: "{playlist_name}"
+
+لديك التحليل الكامل للفيديوهات التالية:
 
 {chr(10).join(video_context)}
 
@@ -406,13 +436,13 @@ def chat_with_playlist(
 
 أجب بـ JSON فقط بالشكل التالي:
 {{
-  "answer": "إجابة واضحة ومفيدة بالعربية مبنية على محتوى الـ Playlist",
+  "answer": "{answer_instruction}",
   "referenced_videos": [
     {{"video_id": "...", "title": "...", "position": 0}}
   ]
 }}
 
-إذا كان السؤال غير متعلق بالـ Playlist، وضح ذلك بلطف."""
+إذا كان السؤال غير متعلق بالمحتوى المحلَّل، وضح ذلك بلطف وأجب بما تعرفه عموماً."""
 
     try:
         raw = _call_model(prompt)
