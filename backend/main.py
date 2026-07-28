@@ -9,11 +9,11 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 
 from backend.models.schemas import (
+    AssistantRequest, AssistantResponse, RAGIndexRequest,
     ChannelSearchRequest, ChatRequest, ChatResponse,
     CompareRequest, StartSessionRequest,
 )
 from backend.services import cache_service, gemini_service, memory_service, youtube_service
-from backend.services.youtube_service import search_all, get_channel_uploads_playlist_id
 
 app = FastAPI(title="PlaylistAI", version="3.0.0")
 
@@ -66,18 +66,14 @@ def search(req: ChannelSearchRequest):
             raise HTTPException(502, str(e))
         if not info:
             raise HTTPException(404, "Playlist not found")
-        return {"type": "playlist", "playlist": info, "channels": [], "playlists": []}
-    # Keyword search: videos + playlists + channels
-    results = search_all(q)
-    if not results["videos"] and not results["playlists"] and not results["channels"]:
-        raise HTTPException(404, "لم يتم العثور على نتائج")
-    return {
-        "type": "mixed",
-        "videos": results["videos"],
-        "playlists": results["playlists"],
-        "channels": results["channels"],
-        "playlist": None,
-    }
+        return {"type": "playlist", "playlist": info, "channels": []}
+    try:
+        channels = youtube_service.search_channels(q)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    if not channels:
+        raise HTTPException(404, "No channels found")
+    return {"type": "channels", "channels": channels, "playlist": None}
 
 @app.get("/api/channels/{channel_id}/playlists")
 def get_playlists(channel_id: str):
@@ -85,18 +81,6 @@ def get_playlists(channel_id: str):
         return {"playlists": youtube_service.get_channel_playlists(channel_id)}
     except RuntimeError as e:
         raise HTTPException(502, str(e))
-
-@app.get("/api/channels/{channel_id}/uploads")
-def get_channel_uploads(channel_id: str):
-    """Returns the uploads playlist ID for a channel (all its videos)."""
-    uploads_id = get_channel_uploads_playlist_id(channel_id)
-    if not uploads_id:
-        raise HTTPException(404, "تعذر الحصول على قائمة فيديوهات القناة")
-    try:
-        info = youtube_service.get_playlist_info(uploads_id)
-    except RuntimeError as e:
-        raise HTTPException(502, str(e))
-    return {"playlist_id": uploads_id, "info": info}
 
 # ── Start Session ─────────────────────────────────────────────────────────────
 @app.post("/api/sessions/start")
@@ -116,59 +100,156 @@ def start_session(data: StartSessionRequest):
     )
     cache_service.save_results(sid, [
         {**v, "analyzed": False, "explanation": None, "level": None,
-         "type": None, "topics": [], "estimated_minutes": None, "requires_previous": False}
+         "type": None, "topics": [], "estimated_minutes": None,
+         "requires_previous": False, "rag_indexed": False}
         for v in videos
     ])
     return {"session_id": sid, "total_videos": len(videos),
-            "session": memory_service.get_session(sid)}
+            "channel_name": data.channel_name, "playlist_name": data.playlist_name}
 
-# ── Analyze ───────────────────────────────────────────────────────────────────
+# ── Analyze Next ──────────────────────────────────────────────────────────────
 @app.post("/api/sessions/{session_id}/analyze-next")
 def analyze_next(session_id: str):
     s = memory_service.get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found")
-    if s["status"] == "completed":
-        return {"message": "Already complete", "is_complete": True, "videos": []}
-    unanalyzed = [v for v in cache_service.load_results(session_id) if not v.get("analyzed")]
-    if not unanalyzed:
+    all_v = cache_service.load_results(session_id)
+    pending = [v for v in all_v if not v.get("analyzed")]
+    if not pending:
         memory_service.complete_session(session_id)
-        return {"message": "All analyzed!", "is_complete": True, "videos": []}
-    batch = unanalyzed[:3]
-    enriched = [{**v, "transcript": youtube_service.get_transcript(v["video_id"])} for v in batch]
-    analyzed = gemini_service.analyze_batch(enriched)
-    cache_service.save_results(session_id, analyzed)
-    new_count = cache_service.get_analyzed_count(session_id)
-    memory_service.update_session(session_id, new_count, s["last_batch"] + 1)
-    is_complete = new_count >= s["total_videos"]
-    return {"session_id": session_id, "batch_number": s["last_batch"] + 1,
-            "videos": analyzed, "analyzed_count": new_count,
-            "total_videos": s["total_videos"], "is_complete": is_complete}
+        return {"is_complete": True, "analyzed_count": len(all_v), "total_videos": len(all_v)}
 
+    batch = pending[:3]
+    # Fetch transcripts for batch
+    for v in batch:
+        if not v.get("transcript"):
+            v["transcript"] = youtube_service.get_transcript(v["video_id"])
+
+    analyzed = gemini_service.analyze_batch(batch)
+    cache_service.save_results(session_id, analyzed)
+
+    total_analyzed = cache_service.get_analyzed_count(session_id)
+    is_complete = total_analyzed >= s["total_videos"]
+    if is_complete:
+        memory_service.complete_session(session_id)
+    else:
+        memory_service.update_session(session_id, total_analyzed, s.get("last_batch", 0) + len(batch))
+
+    return {"is_complete": is_complete, "analyzed_count": total_analyzed,
+            "total_videos": s["total_videos"], "batch_size": len(analyzed)}
+
+# ── Analyze Single Video ───────────────────────────────────────────────────────
 @app.post("/api/sessions/{session_id}/analyze-video")
 def analyze_video(session_id: str, data: dict):
-    vid = data.get("video_id")
-    if not vid:
-        raise HTTPException(400, "video_id required")
     s = memory_service.get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found")
+    vid = data.get("video_id")
+    if not vid:
+        raise HTTPException(400, "video_id required")
     all_v = cache_service.load_results(session_id)
     target = next((v for v in all_v if v["video_id"] == vid), None)
     if not target:
-        raise HTTPException(404, "Video not found")
-    if target.get("analyzed"):
-        return {"video": target, "already_analyzed": True}
-    analyzed = gemini_service.analyze_batch(
-        [{**target, "transcript": youtube_service.get_transcript(vid)}])
-    cache_service.save_results(session_id, analyzed)
-    new_count = cache_service.get_analyzed_count(session_id)
-    memory_service.update_session(session_id, new_count, s["last_batch"])
-    if new_count >= s["total_videos"]:
-        memory_service.complete_session(session_id)
-    return {"video": analyzed[0], "analyzed_count": new_count,
-            "total_videos": s["total_videos"],
-            "is_complete": new_count >= s["total_videos"]}
+        raise HTTPException(404, "Video not in session")
+    if not target.get("transcript"):
+        target["transcript"] = youtube_service.get_transcript(vid)
+    result = gemini_service.analyze_batch([target])
+    cache_service.save_results(session_id, result)
+    total_analyzed = cache_service.get_analyzed_count(session_id)
+    memory_service.update_session(session_id, total_analyzed, s.get("last_batch", 0))
+    return result[0] if result else target
+
+# ── RAG Indexing ──────────────────────────────────────────────────────────────
+@app.post("/api/sessions/{session_id}/rag/index")
+def rag_index_session(session_id: str, req: RAGIndexRequest):
+    s = memory_service.get_session(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    try:
+        from backend.services.rag.rag_service import get_rag_service
+        rag = get_rag_service()
+    except Exception as e:
+        raise HTTPException(503, f"RAG service unavailable: {e}")
+    videos = [v for v in cache_service.load_results(session_id) if v.get("analyzed")]
+    if not videos:
+        raise HTTPException(400, "No analyzed videos to index")
+    result = rag.index_session(videos, s, force=req.force_reindex)
+    memory_service.update_rag_index_count(session_id, result["indexed_videos"])
+    # Mark rag_indexed on individual videos
+    all_v = cache_service.load_results(session_id)
+    indexed_ids = {r["video_id"] for r in result.get("results",[]) if r["status"] in ("indexed","already_indexed")}
+    for v in all_v:
+        if v["video_id"] in indexed_ids:
+            v["rag_indexed"] = True
+    cache_service.save_results(session_id, all_v)
+    return result
+
+@app.post("/api/sessions/{session_id}/rag/index-video")
+def rag_index_video(session_id: str, req: RAGIndexRequest):
+    s = memory_service.get_session(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    if not req.video_id:
+        raise HTTPException(400, "video_id required")
+    try:
+        from backend.services.rag.rag_service import get_rag_service
+        rag = get_rag_service()
+    except Exception as e:
+        raise HTTPException(503, f"RAG service unavailable: {e}")
+    meta = {"title": req.video_id, "channel_name": s.get("channel_name",""),
+            "channel_id": s.get("channel_id",""), "playlist_id": s.get("playlist_id",""),
+            "playlist_name": s.get("playlist_name","")}
+    all_v = cache_service.load_results(session_id)
+    target = next((v for v in all_v if v["video_id"] == req.video_id), None)
+    if target:
+        meta["title"] = target.get("title", req.video_id)
+    result = rag.index_video(req.video_id, meta, force=req.force_reindex)
+    if result["status"] in ("indexed","already_indexed") and target:
+        target["rag_indexed"] = True
+        cache_service.save_results(session_id, all_v)
+        rag_count = sum(1 for v in all_v if v.get("rag_indexed"))
+        memory_service.update_rag_index_count(session_id, rag_count)
+    return result
+
+# ── AI Assistant ──────────────────────────────────────────────────────────────
+@app.post("/api/sessions/{session_id}/assistant", response_model=AssistantResponse)
+def assistant(session_id: str, req: AssistantRequest):
+    s = memory_service.get_session(session_id)
+    if not s:
+        raise HTTPException(404, "Session not found")
+    analyzed = [v for v in cache_service.load_results(session_id) if v.get("analyzed")]
+    if not analyzed:
+        raise HTTPException(400, "No analyzed videos yet. Please analyze videos first.")
+    history = [msg.model_dump() for msg in (req.history or [])]
+    try:
+        from backend.services.assistant.assistant_service import get_assistant_service
+        svc = get_assistant_service()
+        result = svc.handle(
+            question=req.question, session=s, history=history,
+            analyzed_videos=analyzed, video_ids=req.video_ids,
+        )
+    except Exception as e:
+        # Graceful fallback to standard Gemini chat
+        result = gemini_service.chat_with_playlist(
+            question=req.question, videos=analyzed,
+            playlist_name=s.get("playlist_name",""), chat_history=history)
+        result["mode"] = "gemini"
+        result["classification"] = "general"
+        result["routing_reason"] = f"Assistant error — fell back to Gemini: {e}"
+        result["retrieval_count"] = 0
+        result["context_tokens"] = 0
+
+    return AssistantResponse(
+        answer=result.get("answer",""),
+        mode=result.get("mode","gemini"),
+        classification=result.get("classification","general"),
+        sources=result.get("sources",[]),
+        referenced_videos=result.get("referenced_videos",[]),
+        confidence=result.get("confidence","medium"),
+        retrieval_count=result.get("retrieval_count",0),
+        context_tokens=result.get("context_tokens",0),
+        duration_s=result.get("duration_s",0.0),
+    )
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 @app.post("/api/sessions/{session_id}/summary")
@@ -179,9 +260,7 @@ def summary(session_id: str):
     cached = memory_service.get_session_summary(session_id)
     if cached:
         return {"summary": cached, "cached": True}
-    videos = [v for v in cache_service.load_results(session_id) if v.get("analyzed")]
-    if not videos:
-        raise HTTPException(400, "No analyzed videos yet")
+    videos = cache_service.load_results(session_id)
     result = gemini_service.generate_playlist_summary(videos, s.get("playlist_name", ""))
     memory_service.save_session_summary(session_id, result)
     return {"summary": result, "cached": False}
@@ -202,44 +281,7 @@ def learning_path(session_id: str):
     memory_service.save_learning_path(session_id, result)
     return {"learning_path": result, "cached": False}
 
-# ── Start Single-Video Session ────────────────────────────────────────────────
-@app.post("/api/sessions/start-video")
-def start_video_session(data: dict):
-    video_id = data.get("video_id")
-    if not video_id:
-        raise HTTPException(400, "video_id required")
-    title = data.get("title", "Unknown Video")
-    channel_id = data.get("channel_id", "")
-    channel_name = data.get("channel_name", "Unknown Channel")
-    thumbnail = data.get("thumbnail", "")
-    description = data.get("description", "")
-    sid = memory_service.create_session(
-        channel_name=channel_name,
-        channel_id=channel_id,
-        playlist_name=title,
-        playlist_id=f"video:{video_id}",
-        total_videos=1,
-    )
-    cache_service.save_results(sid, [{
-        "video_id": video_id,
-        "title": title,
-        "thumbnail": thumbnail,
-        "channel_id": channel_id,
-        "channel_name": channel_name,
-        "description": description,
-        "position": 0,
-        "analyzed": False,
-        "explanation": None,
-        "level": None,
-        "type": None,
-        "topics": [],
-        "estimated_minutes": None,
-        "requires_previous": False,
-    }])
-    return {"session_id": sid, "total_videos": 1,
-            "session": memory_service.get_session(sid)}
-
-# ── Chat ──────────────────────────────────────────────────────────────────────
+# ── Legacy Chat ───────────────────────────────────────────────────────────────
 @app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
 def chat(session_id: str, req: ChatRequest):
     s = memory_service.get_session(session_id)
@@ -264,12 +306,6 @@ def compare(req: CompareRequest):
         raise HTTPException(404, "Session A not found")
     if not sb:
         raise HTTPException(404, "Session B not found")
-    videos_a = [v for v in cache_service.load_results(req.session_id_a) if v.get("analyzed")]
-    videos_b = [v for v in cache_service.load_results(req.session_id_b) if v.get("analyzed")]
-    if not videos_a:
-        raise HTTPException(400, "Playlist A has no analyzed videos yet. Please run the analysis first.")
-    if not videos_b:
-        raise HTTPException(400, "Playlist B has no analyzed videos yet. Please run the analysis first.")
     return gemini_service.compare_playlists(
-        {"name": sa.get("playlist_name", "A"), "videos": videos_a},
-        {"name": sb.get("playlist_name", "B"), "videos": videos_b})
+        {"name": sa.get("playlist_name", "A"), "videos": cache_service.load_results(req.session_id_a)},
+        {"name": sb.get("playlist_name", "B"), "videos": cache_service.load_results(req.session_id_b)})

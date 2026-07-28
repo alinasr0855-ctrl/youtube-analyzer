@@ -1,344 +1,127 @@
-import os
-import re
+"""YouTube Data API — parallel search + thread-safe clients."""
+import os, re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
-
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from youtube_transcript_api import (
-    NoTranscriptFound,
-    TranscriptsDisabled,
-    YouTubeTranscriptApi,
-)
+from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
 
 load_dotenv()
-
-YOUTUBE_API_KEY: str = os.getenv("YOUTUBE_API_KEY", "")
-
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 if not YOUTUBE_API_KEY:
-    raise EnvironmentError(
-        "YOUTUBE_API_KEY is not set. Add it to your .env file."
-    )
+    raise EnvironmentError("YOUTUBE_API_KEY is not set.")
 
-youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+def _make_youtube():
+    return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
-
-# ── URL Helpers ────────────────────────────────────────────────────────────────
+youtube = _make_youtube()
 
 def extract_playlist_id(url: str) -> Optional[str]:
-    """Extracts a playlist ID from any YouTube URL that contains `list=`."""
-    match = re.search(r"list=([A-Za-z0-9_-]+)", url)
-    return match.group(1) if match else None
+    m = re.search(r"list=([A-Za-z0-9_-]+)", url)
+    return m.group(1) if m else None
 
+def _search(query, type_, max_results):
+    yt = _make_youtube()
+    try: resp = yt.search().list(part="snippet", q=query, type=type_, maxResults=max_results, order="relevance").execute()
+    except HttpError as e: raise RuntimeError(str(e))
+    return resp.get("items", [])
 
-def extract_channel_handle(url: str) -> Optional[str]:
-    """Extracts the @handle from a YouTube channel URL."""
-    match = re.search(r"@([A-Za-z0-9_.-]+)", url)
-    return match.group(1) if match else None
+def search_all(query: str) -> Dict:
+    results = {"videos": [], "playlists": [], "channels": []}
+    def _task(kind):
+        type_map = {"videos":"video","playlists":"playlist","channels":"channel"}
+        max_map  = {"videos":12,"playlists":6,"channels":5}
+        items = _search(query, type_map[kind], max_map[kind])
+        if kind == "videos":
+            return kind, [{"video_id":i["id"]["videoId"],"title":i["snippet"]["title"],
+                "description":i["snippet"].get("description",""),"channel_id":i["snippet"]["channelId"],
+                "channel_name":i["snippet"]["channelTitle"],
+                "thumbnail":i["snippet"]["thumbnails"].get("medium",{}).get("url","")} for i in items]
+        elif kind == "playlists":
+            return kind, [{"playlist_id":i["id"]["playlistId"],"title":i["snippet"]["title"],
+                "description":i["snippet"].get("description",""),"channel_id":i["snippet"]["channelId"],
+                "channel_name":i["snippet"]["channelTitle"],
+                "thumbnail":i["snippet"]["thumbnails"].get("medium",{}).get("url",""),"video_count":0} for i in items]
+        else:
+            return kind, [{"channel_id":i["snippet"]["channelId"],"title":i["snippet"]["title"],
+                "description":i["snippet"].get("description",""),
+                "thumbnail":i["snippet"]["thumbnails"].get("default",{}).get("url","")} for i in items]
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for f in as_completed({ex.submit(_task,k):k for k in ("videos","playlists","channels")}):
+            try: kind, data = f.result(); results[kind] = data
+            except: pass
+    return results
 
+def search_channels(query: str) -> List[Dict]:
+    """Search for channels only — used by /api/search when no playlist URL detected."""
+    items = _search(query, "channel", 8)
+    return [{"channel_id":i["snippet"]["channelId"],"title":i["snippet"]["title"],
+             "description":i["snippet"].get("description",""),
+             "thumbnail":i["snippet"]["thumbnails"].get("default",{}).get("url","")} for i in items]
 
-# ── Channels ───────────────────────────────────────────────────────────────────
+def get_channel_playlists(channel_id: str) -> List[Dict]:
+    playlists, npt = [], None
+    while True:
+        try: resp = youtube.playlists().list(part="snippet,contentDetails",channelId=channel_id,maxResults=50,pageToken=npt).execute()
+        except HttpError as e: raise RuntimeError(str(e))
+        for item in resp.get("items",[]):
+            playlists.append({"playlist_id":item["id"],"title":item["snippet"]["title"],
+                "description":item["snippet"].get("description",""),
+                "thumbnail":item["snippet"]["thumbnails"].get("medium",{}).get("url",""),
+                "video_count":item["contentDetails"]["itemCount"]})
+        npt = resp.get("nextPageToken")
+        if not npt: break
+    return playlists
 
 def get_channel_uploads_playlist_id(channel_id: str) -> Optional[str]:
     """Returns the uploads playlist ID for a channel (contains all its videos)."""
     try:
-        response = youtube.channels().list(
-            part="contentDetails",
-            id=channel_id,
-        ).execute()
-        items = response.get("items", [])
-        if not items:
-            return None
+        resp = youtube.channels().list(part="contentDetails", id=channel_id).execute()
+        items = resp.get("items", [])
+        if not items: return None
         return items[0]["contentDetails"]["relatedPlaylists"].get("uploads")
     except HttpError:
         return None
 
-
-def _make_youtube():
-    """Creates a fresh thread-local YouTube API client."""
-    return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-
-
-def _search_videos(query: str) -> List[Dict]:
-    try:
-        yt = _make_youtube()
-        resp = yt.search().list(
-            part="snippet", q=query, type="video", maxResults=15,
-        ).execute()
-        results = []
-        for item in resp.get("items", []):
-            s = item["snippet"]
-            vid = item["id"].get("videoId", "")
-            if not vid:
-                continue
-            results.append({
-                "video_id": vid,
-                "title": s["title"],
-                "description": s.get("description", ""),
-                "thumbnail": s["thumbnails"].get("medium", {}).get("url", ""),
-                "channel_id": s.get("channelId", ""),
-                "channel_name": s.get("channelTitle", ""),
-                "published_at": s.get("publishedAt", ""),
-            })
-        return results
-    except Exception:
-        return []
-
-
-def _search_playlists(query: str) -> List[Dict]:
-    try:
-        yt = _make_youtube()
-        resp = yt.search().list(
-            part="snippet", q=query, type="playlist", maxResults=8,
-        ).execute()
-        results = []
-        for item in resp.get("items", []):
-            s = item["snippet"]
-            pid = item["id"].get("playlistId", "")
-            if not pid:
-                continue
-            results.append({
-                "playlist_id": pid,
-                "title": s["title"],
-                "description": s.get("description", ""),
-                "thumbnail": s["thumbnails"].get("medium", {}).get("url", ""),
-                "channel_id": s.get("channelId", ""),
-                "channel_name": s.get("channelTitle", ""),
-                "video_count": "—",
-            })
-        return results
-    except Exception:
-        return []
-
-
-def _search_channels(query: str) -> List[Dict]:
-    try:
-        yt = _make_youtube()
-        resp = yt.search().list(
-            part="snippet", q=query, type="channel", maxResults=5,
-        ).execute()
-        results = []
-        for item in resp.get("items", []):
-            s = item["snippet"]
-            results.append({
-                "channel_id": s["channelId"],
-                "title": s["title"],
-                "description": s.get("description", ""),
-                "thumbnail": s["thumbnails"].get("default", {}).get("url", ""),
-            })
-        return results
-    except Exception:
-        return []
-
-
-def search_all(query: str) -> Dict:
-    """
-    Searches YouTube for videos, playlists, and channels in parallel.
-    Each worker creates its own API client to avoid thread-safety issues.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        fut_videos    = executor.submit(_search_videos,    query)
-        fut_playlists = executor.submit(_search_playlists, query)
-        fut_channels  = executor.submit(_search_channels,  query)
-
-        videos    = fut_videos.result()
-        playlists = fut_playlists.result()
-        channels  = fut_channels.result()
-
-    return {"videos": videos, "playlists": playlists, "channels": channels}
-
-
-def search_playlists(query: str) -> List[Dict]:
-    return search_all(query).get("playlists", [])
-
-
-def search_channels(query: str) -> List[Dict]:
-    """
-    Searches YouTube for channels matching *query*.
-    Returns an empty list when *query* is a playlist URL (handled separately).
-    """
-    if "list=" in query:
-        return []
-
-    handle = extract_channel_handle(query)
-    search_query = handle if handle else query
-
-    try:
-        response = youtube.search().list(
-            part="snippet",
-            q=search_query,
-            type="channel",
-            maxResults=20,
-        ).execute()
-    except HttpError as exc:
-        raise RuntimeError(f"YouTube API error while searching channels: {exc}") from exc
-
-    return [
-        {
-            "channel_id": item["snippet"]["channelId"],
-            "title": item["snippet"]["title"],
-            "description": item["snippet"].get("description", ""),
-            "thumbnail": (
-                item["snippet"]["thumbnails"].get("default", {}).get("url", "")
-            ),
-        }
-        for item in response.get("items", [])
-    ]
-
-
-# ── Playlists ──────────────────────────────────────────────────────────────────
-
-def get_channel_playlists(channel_id: str) -> List[Dict]:
-    """Returns all playlists for a channel, handling API pagination."""
-    playlists: List[Dict] = []
-    next_page_token: Optional[str] = None
-
-    while True:
-        try:
-            response = youtube.playlists().list(
-                part="snippet,contentDetails",
-                channelId=channel_id,
-                maxResults=50,
-                pageToken=next_page_token,
-            ).execute()
-        except HttpError as exc:
-            raise RuntimeError(f"YouTube API error fetching playlists: {exc}") from exc
-
-        for item in response.get("items", []):
-            playlists.append(
-                {
-                    "playlist_id": item["id"],
-                    "title": item["snippet"]["title"],
-                    "description": item["snippet"].get("description", ""),
-                    "thumbnail": (
-                        item["snippet"]["thumbnails"].get("medium", {}).get("url", "")
-                    ),
-                    "video_count": item["contentDetails"]["itemCount"],
-                }
-            )
-
-        next_page_token = response.get("nextPageToken")
-        if not next_page_token:
-            break
-
-    return playlists
-
-
 def get_playlist_info(playlist_id: str) -> Optional[Dict]:
-    """Returns metadata for a single playlist, or None if not found."""
-    try:
-        response = youtube.playlists().list(
-            part="snippet,contentDetails",
-            id=playlist_id,
-        ).execute()
-    except HttpError as exc:
-        raise RuntimeError(f"YouTube API error fetching playlist info: {exc}") from exc
-
-    items = response.get("items", [])
-    if not items:
-        return None
-
+    try: resp = youtube.playlists().list(part="snippet,contentDetails",id=playlist_id).execute()
+    except HttpError as e: raise RuntimeError(str(e))
+    items = resp.get("items",[])
+    if not items: return None
     item = items[0]
-    return {
-        "playlist_id": playlist_id,
-        "title": item["snippet"]["title"],
-        "description": item["snippet"].get("description", ""),
-        "thumbnail": item["snippet"]["thumbnails"].get("medium", {}).get("url", ""),
-        "video_count": item["contentDetails"]["itemCount"],
-        "channel_id": item["snippet"]["channelId"],
-        "channel_name": item["snippet"]["channelTitle"],
-    }
-
-
-# ── Videos ─────────────────────────────────────────────────────────────────────
+    return {"playlist_id":playlist_id,"title":item["snippet"]["title"],
+            "description":item["snippet"].get("description",""),
+            "thumbnail":item["snippet"]["thumbnails"].get("medium",{}).get("url",""),
+            "video_count":item["contentDetails"]["itemCount"],
+            "channel_id":item["snippet"]["channelId"],"channel_name":item["snippet"]["channelTitle"]}
 
 def get_playlist_videos(playlist_id: str) -> List[Dict]:
-    """Fetches every video in a playlist with title, position, and thumbnail."""
-    videos: List[Dict] = []
-    next_page_token: Optional[str] = None
-
+    videos, npt = [], None
     while True:
-        try:
-            response = youtube.playlistItems().list(
-                part="snippet,contentDetails",
-                playlistId=playlist_id,
-                maxResults=50,
-                pageToken=next_page_token,
-            ).execute()
-        except HttpError as exc:
-            raise RuntimeError(f"YouTube API error fetching playlist videos: {exc}") from exc
-
-        for item in response.get("items", []):
-            snippet = item["snippet"]
-            # Skip deleted/private videos
-            video_id = snippet["resourceId"]["videoId"]
-            if snippet["title"] in ("Deleted video", "Private video"):
-                continue
-            videos.append(
-                {
-                    "video_id": video_id,
-                    "title": snippet["title"],
-                    "position": snippet["position"],
-                    "thumbnail": (
-                        snippet["thumbnails"].get("medium", {}).get("url", "")
-                    ),
-                    "description": snippet.get("description", ""),
-                }
-            )
-
-        next_page_token = response.get("nextPageToken")
-        if not next_page_token:
-            break
-
+        try: resp = youtube.playlistItems().list(part="snippet,contentDetails",playlistId=playlist_id,maxResults=50,pageToken=npt).execute()
+        except HttpError as e: raise RuntimeError(str(e))
+        for item in resp.get("items",[]):
+            s = item["snippet"]; vid = s["resourceId"]["videoId"]
+            if s["title"] in ("Deleted video","Private video"): continue
+            videos.append({"video_id":vid,"title":s["title"],"position":s["position"],
+                "thumbnail":s["thumbnails"].get("medium",{}).get("url",""),"description":s.get("description","")})
+        npt = resp.get("nextPageToken")
+        if not npt: break
     return videos
 
-
-def get_video_details(video_ids: List[str]) -> Dict[str, Dict]:
-    """Batch-fetches full metadata for a list of video IDs."""
-    if not video_ids:
-        return {}
+def get_transcript(video_id: str, languages=("ar","en"), max_chars=8000) -> str:
     try:
-        response = youtube.videos().list(
-            part="snippet,contentDetails",
-            id=",".join(video_ids),
-        ).execute()
-    except HttpError as exc:
-        raise RuntimeError(f"YouTube API error fetching video details: {exc}") from exc
-
-    return {
-        item["id"]: {
-            "title": item["snippet"]["title"],
-            "description": item["snippet"].get("description", ""),
-            "duration": item["contentDetails"].get("duration", ""),
-            "thumbnail": (
-                item["snippet"]["thumbnails"].get("medium", {}).get("url", "")
-            ),
-        }
-        for item in response.get("items", [])
-    }
-
-
-# ── Transcripts ────────────────────────────────────────────────────────────────
-
-def get_transcript(
-    video_id: str,
-    languages: List[str] = ("ar", "en"),
-    max_chars: int = 8000,
-) -> str:
-    """
-    Tries to fetch a transcript for *video_id* in the preferred *languages*.
-    Falls back to any available language, then returns an empty string on failure.
-    """
-    try:
-        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=list(languages))
-        return " ".join(t["text"] for t in segments)[:max_chars]
+        segs = YouTubeTranscriptApi.get_transcript(video_id, languages=list(languages))
+        return " ".join(t["text"] for t in segs)[:max_chars]
     except (NoTranscriptFound, TranscriptsDisabled):
-        try:
-            segments = YouTubeTranscriptApi.get_transcript(video_id)
-            return " ".join(t["text"] for t in segments)[:max_chars]
-        except Exception:
-            return ""
-    except Exception:
-        return ""
+        try: segs = YouTubeTranscriptApi.get_transcript(video_id); return " ".join(t["text"] for t in segs)[:max_chars]
+        except: return ""
+    except: return ""
+
+def get_transcript_with_timestamps(video_id: str, languages=("ar","en")) -> List[Dict]:
+    try: return YouTubeTranscriptApi.get_transcript(video_id, languages=list(languages))
+    except (NoTranscriptFound, TranscriptsDisabled):
+        try: return YouTubeTranscriptApi.get_transcript(video_id)
+        except: return []
+    except: return []
