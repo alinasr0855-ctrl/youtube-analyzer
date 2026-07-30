@@ -19,7 +19,7 @@ class RAGService:
         self.ingester    = DocumentIngester()
         self.chunker     = HybridChunker(chunk_size=512, chunk_overlap=64)
         self.retriever   = RAGRetriever(top_k=10, score_threshold=0.30, mmr_top_n=5)
-        self.ctx_builder = ContextBuilder(max_context_tokens=6000)
+        self.ctx_builder = ContextBuilder(max_tokens=6000)
         self.prompter    = PromptEngineer()
         self._embedder   = None
         self._vs         = None
