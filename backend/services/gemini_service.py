@@ -12,13 +12,13 @@ genai.configure(api_key=_GEMINI_KEY)
 
 _GEMINI_MODELS = ["gemini-2.0-flash-lite","gemini-2.0-flash",
                   "gemini-1.5-flash","gemini-1.5-flash-8b","gemini-1.5-pro"]
-_OR_FALLBACK = ["meta-llama/llama-3.2-3b-instruct:free",
-                "meta-llama/llama-3.3-70b-instruct:free",
+_OR_FALLBACK = ["google/gemma-3-12b-it:free",
                 "google/gemma-3-4b-it:free",
-                "google/gemma-3-27b-it:free",
+                "qwen/qwen3-8b:free",
+                "qwen/qwen3-14b:free",
                 "mistralai/mistral-7b-instruct:free",
-                "deepseek/deepseek-chat",
-                "mistralai/mistral-small-2506"]
+                "deepseek/deepseek-r1-0528:free",
+                "tngtech/deepseek-r1t2-chimera:free"]
 _or_models_cache: Optional[List[str]] = None
 _gemini_cache: Dict[str,genai.GenerativeModel] = {}
 
