@@ -12,13 +12,13 @@ genai.configure(api_key=_GEMINI_KEY)
 
 _GEMINI_MODELS = ["gemini-2.0-flash-lite","gemini-2.0-flash",
                   "gemini-1.5-flash","gemini-1.5-flash-8b","gemini-1.5-pro"]
-_OR_FALLBACK = ["google/gemma-3-12b-it:free",
-                "google/gemma-3-4b-it:free",
-                "qwen/qwen3-8b:free",
-                "qwen/qwen3-14b:free",
-                "mistralai/mistral-7b-instruct:free",
-                "deepseek/deepseek-r1-0528:free",
-                "tngtech/deepseek-r1t2-chimera:free"]
+_OR_FALLBACK = ["google/gemma-4-31b-it:free",
+                "google/gemma-4-26b-a4b-it:free",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "openai/gpt-oss-20b:free",
+                "nvidia/nemotron-nano-9b-v2:free",
+                "nvidia/nemotron-3-nano-30b-a3b:free",
+                "poolside/laguna-s-2.1:free"]
 _or_models_cache: Optional[List[str]] = None
 _gemini_cache: Dict[str,genai.GenerativeModel] = {}
 
@@ -43,18 +43,30 @@ def _get_gemini(name):
     return _gemini_cache[name]
 
 def _is_quota(exc): err=str(exc); return any(k in err for k in ("429","quota","rate","exceeded","RESOURCE_EXHAUSTED"))
+def _is_skip(exc):
+    """Return True for errors where we should try the next model (not fatal)."""
+    err=str(exc)
+    return any(k in err for k in ("404","400","unavailable","not found","deprecated",
+                                   "not available","no endpoints","overloaded","503","502"))
+def _is_fatal(exc):
+    """Return True for errors where retrying any model is pointless (e.g. auth)."""
+    err=str(exc); return any(k in err for k in ("401","403","invalid_api_key","authentication"))
 
 _CFG={"max_output_tokens":2048,"temperature":0.4}
 
 def _call_model(prompt:str) -> str:
-    """Public: call the best available model with full fallback chain."""
+    """Gemini cascade → OpenRouter free fallback. Skips unavailable/quota models."""
     last=None
+    # ── Gemini cascade ──────────────────────────────────────────────────────
     for name in _GEMINI_MODELS:
         try: return _get_gemini(name).generate_content(prompt,generation_config=_CFG).text.strip()
         except Exception as e:
             last=e
-            if _is_quota(e): time.sleep(2); continue
-            else: raise
+            if _is_fatal(e): break          # auth failure – stop Gemini entirely
+            if _is_quota(e): time.sleep(2)  # rate-limited – wait then next model
+            # 404 / deprecated / any other – just try next Gemini model
+            continue
+    # ── OpenRouter fallback ─────────────────────────────────────────────────
     if _OR_KEY:
         try:
             from openai import OpenAI
@@ -63,14 +75,19 @@ def _call_model(prompt:str) -> str:
         seen,ordered=set(),[]
         for m in _OR_FALLBACK+_fetch_or_models():
             if m not in seen: seen.add(m); ordered.append(m)
-        for name in ordered[:5]:
+        for name in ordered[:10]:           # try up to 10 free models
             try:
-                c=client.chat.completions.create(model=name,messages=[{"role":"user","content":prompt}],max_tokens=2048,timeout=30)
+                c=client.chat.completions.create(
+                    model=name,
+                    messages=[{"role":"user","content":prompt}],
+                    max_tokens=2048,timeout=30)
                 return c.choices[0].message.content.strip()
             except Exception as e:
                 last=e
-                if _is_quota(e): time.sleep(2); continue
-                else: raise
+                if _is_fatal(e): break      # auth failure – stop OR entirely
+                if _is_quota(e): time.sleep(2)
+                # 404 unavailable / skip → try next model
+                continue
     raise RuntimeError(f"All models exhausted. Last: {last}")
 
 def _safe_json(text:str) -> Optional[dict]:
